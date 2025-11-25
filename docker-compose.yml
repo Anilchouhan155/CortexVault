@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  nexabrain-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexabrain-py-backend
+    ports:
+      - "3001:3001"
+    environment:
+      # WhatsApp Configuration
+      - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
+      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+      - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN}
+      - WHATSAPP_URL=${WHATSAPP_URL:-https://graph.facebook.com/v18.0}
+      
+      # Google Gemini AI
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      
+      # Supabase Database
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      
+      # Google Cloud APIs
+      - GOOGLE_SPEECH_API_KEY=${GOOGLE_SPEECH_API_KEY}
+      - GOOGLE_TRANSLATE_API_KEY=${GOOGLE_TRANSLATE_API_KEY}
+      
+      # Server Configuration
+      - PORT=3001
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - NODE_ENV=${NODE_ENV:-production}
+    volumes:
+      # Mount temp directory for voice processing
+      - ./temp:/app/temp
+      # Mount conversations.json if using JSON fallback
+      - ./conversations.json:/app/conversations.json:rw
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:3001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+

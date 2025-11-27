@@ -11,8 +11,13 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 import httpx
-from ai import generate_ai_response
-from database import save_conversation, get_recent_conversations
+from ai import generate_ai_response, generate_batch_memory_summary
+from database import save_conversation, get_recent_conversations, get_or_create_user
+from services.memory_service import (
+    process_session_message,
+    extract_memory_facts,
+    save_extracted_memories
+)
 
 # Load environment variables
 load_dotenv()
@@ -231,10 +236,44 @@ async def process_message(message: Dict[str, Any], contact: Optional[Dict[str, A
 
         print(f'📱 Message from {user_name} ({user_phone}): {user_message[:100]}{"..." if len(user_message) > 100 else ""}')
 
-        # Get recent conversation context
-        recent_chats = await get_recent_conversations(user_phone, 5)
+        # Get or create user ID for memory system
+        user_id = await get_or_create_user(user_phone, user_name)
+        if not user_id:
+            # Fallback to phone number if user creation fails
+            user_id = user_phone
+
+        # Process session and retrieve memories (with fallback)
+        memory_context = None
+        try:
+            memory_context = await process_session_message(
+                user_id=user_id,
+                user_message=user_message,
+                ai_response=''  # Will be filled after generation
+            )
+        except Exception as error:
+            print(f'⚠️  Error processing session/memory (falling back to basic mode): {error}')
+            memory_context = None
+
+        # Get short-term memory (session buffer)
+        short_term_memory = memory_context.get('short_term_memory', []) if memory_context else []
         
-        # Generate AI response with timeout
+        # Get long-term memories if retrieved
+        long_term_memories = memory_context.get('long_term_memories', []) if memory_context else []
+        
+        # Log memory retrieval for debugging
+        if long_term_memories:
+            print(f'📝 Retrieved {len(long_term_memories)} memories for query: "{user_message[:50]}"')
+            for i, mem in enumerate(long_term_memories[:3], 1):
+                print(f'   {i}. {mem.get("content", "")[:60]} (similarity: {mem.get("similarity", 0):.3f})')
+        else:
+            print(f'⚠️  No memories retrieved for query: "{user_message[:50]}"')
+        
+        # Get recent conversation context (fallback if memory system fails)
+        recent_chats = await get_recent_conversations(user_phone, 5)
+        if not short_term_memory and recent_chats:
+            short_term_memory = recent_chats
+        
+        # Generate AI response with timeout and memory context
         ai_response = None
         try:
             start_time = datetime.now()
@@ -251,7 +290,13 @@ async def process_message(message: Dict[str, Any], contact: Optional[Dict[str, A
             
             # Race between AI response and timeout
             response_task = asyncio.create_task(
-                generate_ai_response(user_message, recent_chats, user_name, target_language)
+                generate_ai_response(
+                    user_message=user_message,
+                    conversation_history=short_term_memory,
+                    user_name=user_name,
+                    target_language=target_language,
+                    retrieved_memories=long_term_memories
+                )
             )
             timeout_task = asyncio.create_task(asyncio.sleep(20))  # 20 second timeout
             
@@ -277,6 +322,33 @@ async def process_message(message: Dict[str, Any], contact: Optional[Dict[str, A
             if 'timeout' in str(error).lower():
                 print('⚠️ Gemini API took longer than 20 seconds to respond')
             ai_response = "Hey! Something went wrong on my end. Can you try again? 😅"
+        
+        # Update session with AI response
+        if memory_context:
+            try:
+                from services.memory_service import update_session
+                await update_session(user_id, {
+                    'userMessage': user_message,
+                    'aiResponse': ai_response,
+                    'timestamp': datetime.now().isoformat()
+                })
+            except Exception as error:
+                print(f'⚠️  Error updating session: {error}')
+        
+        # Extract and save memories (hot path)
+        try:
+            facts = await extract_memory_facts(
+                user_message=user_message,
+                session_buffer=short_term_memory,
+                ai_response=ai_response
+            )
+            
+            if facts and len(facts) > 0:
+                saved_count = await save_extracted_memories(user_id, facts)
+                if saved_count > 0:
+                    print(f'💾 Saved {saved_count} memory fact(s)')
+        except Exception as error:
+            print(f'⚠️  Error extracting/saving memories: {error}')
         
         # Save conversation
         saved = await save_conversation({
